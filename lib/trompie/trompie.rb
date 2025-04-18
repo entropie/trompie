@@ -43,13 +43,13 @@ module Trompie
     }
 
 
-    HostDef = Struct.new(:ahost, :aport) do
+    HostDef = Struct.new(:host, :port) do
       def to_s
-        "#{ahost}:#{aport}"
+        "#{host}:#{port}"
       end
 
       def uri(*ads)
-        base = "http%s://%s" % [(aport == 443 ? "s" : ""), ahost]
+        base = "http%s://%s" % [(aport == 443 ? "s" : ""), host]
         [base].push(*ads).join("/")
       end
     end
