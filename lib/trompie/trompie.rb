@@ -109,14 +109,14 @@ module Trompie
       @client ||= MQTT::Client.connect(host.host, host.port)
     end
 
-    def submit(topic, payload)
-      client.publish(topic, payload)
+    def submit(topic, payload, opts = {  })
+      client.publish(topic, payload, opts)
     end
 
-    def publish(topic)
+    def publish(topic, opts = {  })
       if block_given?
         payload = yield
-        submit(topic, payload)
+        submit(topic, payload, opts)
         payload
       end
     end
