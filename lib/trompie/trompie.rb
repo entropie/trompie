@@ -35,6 +35,13 @@ module Trompie
   HASS_TOKEN = setenv
   abort "problems with token" unless HASS_TOKEN
 
+  def self.do_with_synced_stdout(&blk)
+    old_sync = $stdout.sync
+    $stdout.sync = true
+    blk.call
+  ensure
+    $stdout.sync = old_sync
+  end
 
   class CFG
     DEFAULT_SETTINGS = {
