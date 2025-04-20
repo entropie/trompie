@@ -9,6 +9,8 @@ require 'pp'
 module Trompie
   extend self
 
+  VERSION = %w'0 0 1-pre'
+
   def log(*args, prefix: " >")
     args.each { |a| $stdout.puts "#{prefix} #{a}" }
   end
@@ -16,6 +18,14 @@ module Trompie
 
   def debug
     yield
+  end
+
+  def self.version
+    VERSION.join(".")
+  end
+
+  def self.log_basedir
+    debug { log "#{version} from #{$LOAD_PATH.first}" }
   end
 
   def self.setenv
