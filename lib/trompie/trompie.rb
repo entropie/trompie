@@ -9,16 +9,41 @@ require 'pp'
 module Trompie
   extend self
 
-  VERSION = %w'0 0 1-pre'
+  VERSION  = %w'0 0 1-pre'
+
+  ENV_FILE = '/etc/nixos/res/hass_token.env'.freeze
+
+  ENV_VARIABLES = %w'HASS_TOKEN HASS_HOST MQTT_ENDPOINT'
 
   def log(*args, prefix: " >")
     args.each { |a| $stdout.puts "#{prefix} #{a}" }
   end
   module_function :log
 
+  def self.debug?
+    $debug || @debug || false
+  end
+
+  def self.debug=(bool)
+    @debug = !!bool
+  end
+
   def debug
+    if $debug
+      yield
+    end
+  end
+
+  def info
     yield
   end
+
+  def error(code: 1, prefix: "!>", **kwargs)
+    $stdout.puts "#{prefix} #{kwargs.inspect}"
+    exit 1
+  end
+
+  module_function :debug, :info, :error
 
   def self.version
     VERSION.join(".")
@@ -28,22 +53,39 @@ module Trompie
     debug { log "#{version} from #{$LOAD_PATH.first}" }
   end
 
-  def self.setenv
-    env_file = '/etc/nixos/res/hass_token.env'
+  def self.env_from_file(env_file = ENV_FILE)
+    result = {  }
     if(File.exist?(env_file))
       File.readlines(env_file).each do |line|
         next if line.strip.empty? || line.start_with?('#')
         key, value = line.strip.split('=', 2)
         if key && value
-          ENV[key] = value
+          result[key] = value
         end
       end
     end
-    ENV["HASS_TOKEN"]
+    result
   end
 
-  HASS_TOKEN = setenv
-  abort "problems with token" unless HASS_TOKEN
+  def self.checkenv(env_file = ENV_FILE)
+    # no need to check file since every ENV_VARIABLE is set
+    return true if ENV_VARIABLES.map{ |ev| ENV[ev] }.compact.size == ENV_VARIABLES.size
+    env_from_file = env_from_file(env_file)
+    localenv = env_from_file.dup
+
+    ENV_VARIABLES.each do |ev|
+      localenv[ev] = ENV[ev] if ENV[ev]
+    end
+    localenv.each do |envk, envv|
+      ENV[envk] = envv
+    end
+
+    localenv
+  end
+
+  checkenv
+
+  abort "problems with token" unless ENV["HASS_TOKEN"]
 
   def self.do_with_synced_stdout(&blk)
     old_sync = $stdout.sync
@@ -54,63 +96,80 @@ module Trompie
   end
 
   class CFG
-    DEFAULT_SETTINGS = {
-      ha: "%s:443" % ENV["HASS_HOST"],
-      mqtt: "192.168.1.3:1883"
-    }
-
-
-    HostDef = Struct.new(:host, :port) do
-      def to_s
-        "#{host}:#{port}"
-      end
-
-      def uri(*ads)
-        base = "http%s://%s" % [(aport == 443 ? "s" : ""), host]
-        [base].push(*ads).join("/")
-      end
+    def self.token
+      ENV["HASS_TOKEN"]
     end
 
-    DEFAULT_SETTINGS.keys.each do |key|
-      singleton_class.define_method("#{key}=") do |value|
-        instance_variable_set("@#{key}", value)
+    def self.host
+      ENV["HASS_HOST"]
+    end
+
+    def self.mqtt_endpoint
+      ENV["MQTT_ENDPOINT"]
+    end
+
+    def self.mqtt_host
+      mqtt_endpoint.split(":").first
+    end
+
+    def self.mqtt_port
+      mqtt_endpoint.split(":").last
+    end
+
+    def self.uri(*ads)
+      [host].push(*ads).join("/")
+    end
+  end
+
+  module ResultEnhancer
+    def self.extended(base)
+      base.instance_eval do
+        if self["state"] and self["attributes"]["unit_of_measurement"]
+          self["state"] = "%s%s" % [ self["state"], self["attributes"]["unit_of_measurement"] ]
+        end
       end
 
-      singleton_class.define_method(key) do
-        ret = instance_variable_get("@#{key}") || DEFAULT_SETTINGS[key]
-        hs, port = ret.split(":")
-        HostDef.new(hs, port.to_i)
+      def value
+        self["value"] || self["state"]
       end
     end
   end
 
-
   class HA
     attr_reader :host
 
-    def initialize(hoststruct = CFG.ha)
-      @host = hoststruct
+    def initialize(config = CFG)
+      @config = config
+    end
+
+    def host
+      @config.host
     end
 
     # make_req(:states, "sensor.temperature")
-    def make_req(*args, basepath: "api")
+    def make_req(*args, from: :ha, basepath: "api", raw: false)
       path = [basepath].push(*args)
+      uri = URI(@config.uri(*path))
 
-      uri = URI(host.uri(*path))
       req = Net::HTTP::Get.new(uri)
-      req['Authorization'] = "Bearer #{HASS_TOKEN}"
+      req['Authorization'] = "Bearer #{@config.token}"
       req['Content-Type'] = 'application/json'
 
-      Trompie.debug{ Trompie.log({ from: :ha, arget: uri.to_s }) }
-      res = Net::HTTP.start(uri.hostname, uri.port, use_ssl: uri.scheme == 'https') do |http|
+      Trompie.debug{ Trompie.log({type: :request, from: from, endpoint: uri.host, path: path.join("/")}) }
+
+      res = Net::HTTP.start(uri.hostname, uri.port, use_ssl: (uri.scheme == 'https' || uri.port == 443)) do |http|
         http.request(req)
       end
 
+      result = nil
       begin
-        JSON.parse(res.body)
+        result = JSON.parse(res.body)
       rescue JSON::ParserError
         raise "invalid JSON from HA: #{res.code} #{res.body}"
       end
+      return raw ? result : result.extend(ResultEnhancer)
+    rescue SocketError => a
+      Trompie.error(type: :error, from: :ha, uri: uri.path, message: $!.to_s)
     end
   end
 
@@ -118,12 +177,13 @@ module Trompie
   class MMQTT
     attr_reader :host
 
-    def initialize(hoststruct = CFG.mqtt)
-      @host = hoststruct
+    def initialize(host = CFG.mqtt_host, port = CFG.mqtt_port)
+      @host = host
+      @port = port
     end
 
     def client
-      @client ||= MQTT::Client.connect(host.host, host.port)
+      @client ||= MQTT::Client.connect(@host, @port)
     end
 
     def submit(topic, payload, opts = {  })
