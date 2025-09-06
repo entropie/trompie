@@ -5,6 +5,7 @@ require 'json'
 require 'uri'
 require 'mqtt'
 require 'pp'
+require 'tempfile'
 
 module Trompie
   extend self
@@ -146,12 +147,42 @@ module Trompie
       @config.host
     end
 
+    def make_result(res, raw: false, output_file: nil)
+      result = {  }
+      response =
+        case res.content_type
+
+        when "application/json"
+          res = JSON.parse(res.body)
+
+        when "image/jpeg"
+          if output_file
+            File.binwrite(output_file, res.body)
+          else
+            tf = Tempfile.new(%w[trompie_snapshot .jpg], binmode: true)
+            tf.write(res.body)
+            tf.rewind
+            output_file = tf
+          end
+          if raw
+            return tf.read
+          end
+          { output_file: tf }
+        end
+      result = result.merge(response)
+      raw ? result : result.extend(ResultEnhancer)
+
+    rescue JSON::ParserError
+      raise "invalid JSON from HA: #{res.code} #{res.body}"
+    end
+
     # make_req(:states, "sensor.temperature")
-    def make_req(*args, from: :ha, basepath: "api", raw: false)
+    def make_req(*args, from: :ha, basepath: "api", raw: false, output_file: nil)
       path = [basepath].push(*args)
       uri = URI(@config.uri(*path))
 
       req = Net::HTTP::Get.new(uri)
+
       req['Authorization'] = "Bearer #{@config.token}"
       req['Content-Type'] = 'application/json'
 
@@ -160,14 +191,8 @@ module Trompie
       res = Net::HTTP.start(uri.hostname, uri.port, use_ssl: (uri.scheme == 'https' || uri.port == 443)) do |http|
         http.request(req)
       end
-
-      result = nil
-      begin
-        result = JSON.parse(res.body)
-      rescue JSON::ParserError
-        raise "invalid JSON from HA: #{res.code} #{res.body}"
-      end
-      return raw ? result : result.extend(ResultEnhancer)
+      make_result(res, raw: raw, output_file: output_file)
+      
     rescue SocketError => a
       Trompie.error(type: :error, from: :ha, uri: uri.path, message: $!.to_s)
     end
