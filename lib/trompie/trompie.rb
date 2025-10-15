@@ -133,6 +133,14 @@ module Trompie
       def value
         self["value"] || self["state"]
       end
+
+      def true?
+        value == "True"
+      end
+
+      def false?
+        !true?
+      end
     end
   end
 
